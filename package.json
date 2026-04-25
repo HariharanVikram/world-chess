@@ -1,0 +1,17 @@
+{
+  "name": "world-chess",
+  "version": "1.0.0",
+  "description": "A free no-login web chess game with friend links, AI, themes, and full legal move validation.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "chess",
+    "web",
+    "multiplayer"
+  ],
+  "author": "",
+  "license": "GPL-3.0"
+}

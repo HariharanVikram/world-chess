@@ -1,0 +1,51 @@
+# World Chess
+
+A lightweight browser chess platform for public, no-login play.
+
+## Features
+
+- Complete chess rule enforcement: legal moves, check, checkmate, stalemate, castling, en passant, and promotion.
+- Friend-link multiplayer with server-side move validation.
+- Stockfish-powered AI opponent with easy, medium, and hard difficulty levels.
+- 5 minute, 10 minute, 30 minute, and unlimited formats.
+- White, black, or random side selection.
+- Board themes, legal-move highlighting, and responsive touch-friendly controls.
+- Local game restore for AI games.
+
+## Run Locally
+
+If `npm` is installed:
+
+```powershell
+npm start
+```
+
+If Windows says `npm` is not recognized, run the included launcher:
+
+```cmd
+start.bat
+```
+
+Or run Node directly:
+
+```cmd
+node server.js
+```
+
+Open:
+
+```text
+http://localhost:3000
+```
+
+## Hosting
+
+This project has no external dependencies. Any host that can run a small Node server can host it. Free-friendly options include Render, Railway, Fly.io, and a low-traffic VPS. The friend-link mode needs the Node server because rooms and moves are validated through `/api/rooms`.
+
+For a public launch, point a domain at the hosted server and submit the site to search engines. No account system or paid service is required by the code.
+
+## AI Engine
+
+The browser loads Stockfish from the free cdnjs CDN and asks it for UCI best moves. Every Stockfish move is still validated by the local legal-move engine before it is applied. If Stockfish cannot load, the game falls back to the smaller built-in AI so play can continue.
+
+Stockfish is GPL-3.0 licensed, so this project metadata uses GPL-3.0 as well.
