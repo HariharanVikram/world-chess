@@ -21,6 +21,7 @@ const state = {
   format: "10",
   colorChoice: "white",
   playerColor: "white",
+  roomRole: "none",
   difficulty: "medium",
   roomId: null,
   playerId: null,
@@ -33,12 +34,14 @@ const state = {
   orientation: "white",
   lastMove: null,
   lastAnimatedMoveKey: null,
-  aiThinking: false
+  aiThinking: false,
+  friendRoomRequestSeq: 0
 };
 
 const stockfish = createStockfishClient();
 const AI_RESPONSE_DELAY_MS = 560;
 const AI_MIN_THINK_MS = 750;
+const EASY_RANDOM_MOVE_CHANCE = 0.55;
 
 const boardEl = document.querySelector("#board");
 const gameArea = document.querySelector("#gameArea");
@@ -69,7 +72,7 @@ const themeSelectGame = document.querySelector("#themeSelectGame");
 const difficultyGroup = document.querySelector("#difficultyGroup");
 let loadingTransitionInFlight = false;
 
-function init() {
+async function init() {
   if (!boardEl || !setupPanel || !startBtn) {
     console.error("World Chess: required UI elements are missing.");
     return;
@@ -78,21 +81,42 @@ function init() {
   restorePreferences();
   if (resumeBtn) resumeBtn.classList.toggle("hidden", !localStorage.getItem("worldChessGame"));
   const params = new URLSearchParams(location.search);
-  const room = params.get("room");
+  const room = normalizeRoomId(params.get("room"));
   if (room) {
-    joinRoom(room).catch(error => {
-      console.error(error);
-      showToast("Could not join room.");
+    await runLoadingTransition(async () => {
+      try {
+        await joinRoom(room);
+      } catch (error) {
+        console.error(error);
+        showToast("Could not join room.");
+        render();
+      }
     });
+    return;
   }
-  render();
+  await runLoadingTransition(async () => {
+    render();
+  });
 }
 
 function basePath() {
-  // Always return a path that ends with / so relative URLs resolve consistently.
-  const path = location.pathname || "/";
-  if (path.endsWith("/")) return path;
-  return `${path}/`;
+  // Resolve the app root regardless of whether the page is /, /foo/, or /foo/index.html.
+  const currentPath = location.pathname || "/";
+  if (currentPath.endsWith("/")) return currentPath;
+  if (/\.[A-Za-z0-9]+$/.test(currentPath)) {
+    const slashIndex = currentPath.lastIndexOf("/");
+    return slashIndex >= 0 ? currentPath.slice(0, slashIndex + 1) : "/";
+  }
+  return `${currentPath}/`;
+}
+
+function apiUrl(endpoint) {
+  const suffix = endpoint.startsWith("/") ? endpoint.slice(1) : endpoint;
+  return `${basePath()}api/${suffix}`;
+}
+
+function normalizeRoomId(value) {
+  return String(value || "").trim();
 }
 
 function bindControls() {
@@ -103,24 +127,44 @@ function bindControls() {
       if (difficultyGroup) difficultyGroup.classList.toggle("hidden", state.mode !== "ai");
       if (state.mode === "friend") {
         showFriendShare(true);
-        await ensureFriendRoom();
+        state.roomId = null;
+        state.playerId = null;
+        state.roomRole = "none";
+        if (friendLinkInput) friendLinkInput.value = "";
+        setFriendShareStatus("Press Start to generate a fresh invite link.", false);
       } else {
+        state.friendRoomRequestSeq += 1;
+        state.roomRole = "none";
         showFriendShare(false);
       }
     });
   });
   document.querySelectorAll("[data-format]").forEach(btn => {
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", () => {
       activate(btn.parentElement, btn);
       state.format = btn.dataset.format;
-      if (state.mode === "friend") await ensureFriendRoom(true);
+      if (state.mode === "friend" && !state.gameStarted) {
+        state.friendRoomRequestSeq += 1;
+        state.roomId = null;
+        state.playerId = null;
+        state.roomRole = "none";
+        if (friendLinkInput) friendLinkInput.value = "";
+        setFriendShareStatus("Press Start to generate a fresh invite link.", false);
+      }
     });
   });
   document.querySelectorAll("[data-color]").forEach(btn => {
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", () => {
       activate(btn.parentElement, btn);
       state.colorChoice = btn.dataset.color;
-      if (state.mode === "friend") await ensureFriendRoom(true);
+      if (state.mode === "friend" && !state.gameStarted) {
+        state.friendRoomRequestSeq += 1;
+        state.roomId = null;
+        state.playerId = null;
+        state.roomRole = "none";
+        if (friendLinkInput) friendLinkInput.value = "";
+        setFriendShareStatus("Press Start to generate a fresh invite link.", false);
+      }
     });
   });
   document.querySelectorAll("[data-difficulty]").forEach(btn => {
@@ -181,6 +225,14 @@ function setFriendShareStatus(text, loading = false) {
 
 async function ensureFriendRoom(forceNew = false) {
   if (state.mode !== "friend") return;
+  const requestSeq = ++state.friendRoomRequestSeq;
+  if (forceNew) {
+    if (state.roomId) sessionStorage.removeItem(`room:${state.roomId}`);
+    state.roomId = null;
+    state.playerId = null;
+    state.playerColor = "white";
+    state.roomRole = "none";
+  }
   if (state.roomId && state.playerId && !forceNew) {
     if (friendLinkInput) friendLinkInput.value = roomLink();
     setFriendShareStatus("Share this link. We will start when your friend joins.", false);
@@ -189,23 +241,25 @@ async function ensureFriendRoom(forceNew = false) {
   setFriendShareStatus("Preparing secure invite link", true);
   if (friendLinkInput) friendLinkInput.value = "";
   try {
-    const response = await fetch("/api/rooms", {
+    const response = await fetch(apiUrl("/rooms"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ format: state.format, colorChoice: state.colorChoice })
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Could not create friend room.");
-    if (state.mode !== "friend") return;
+    if (state.mode !== "friend" || requestSeq !== state.friendRoomRequestSeq) return;
     state.roomId = data.room.id;
     state.playerId = data.playerId;
     state.playerColor = data.playerColor;
+    state.roomRole = "player";
     state.orientation = data.playerColor;
     state.game = ChessGame.fromJSON(data.room.game);
     sessionStorage.setItem(`room:${state.roomId}`, JSON.stringify({ playerId: state.playerId, playerColor: state.playerColor }));
     if (friendLinkInput) friendLinkInput.value = roomLink();
     setFriendShareStatus("Share this link. We will start when your friend joins.", false);
   } catch (error) {
+    if (requestSeq !== state.friendRoomRequestSeq) return;
     setFriendShareStatus("Could not generate link. Try again.", false);
     showToast(String(error?.message || error || "Could not create room."));
   }
@@ -278,8 +332,9 @@ async function startGame() {
 
   if (state.mode === "friend") {
     try {
-      await ensureFriendRoom();
+      await ensureFriendRoom(true);
       if (!state.roomId || !state.playerId) throw new Error("Friend room is not ready yet.");
+      state.roomRole = "player";
       history.replaceState(null, "", `${basePath()}?room=${state.roomId}`);
       copyLinkBtn.classList.remove("hidden");
       roomStatus.textContent = "Invite sent. Waiting for your friend to join.";
@@ -294,6 +349,7 @@ async function startGame() {
   } else {
     state.roomId = null;
     state.playerId = null;
+    state.roomRole = "none";
     showFriendShare(false);
     state.playerColor = chooseColor();
     state.orientation = state.playerColor;
@@ -325,6 +381,10 @@ function showGame() {
 }
 
 function showMenu() {
+  state.mode = "ai";
+  showFriendShare(false);
+  if (difficultyGroup) difficultyGroup.classList.remove("hidden");
+  document.querySelectorAll("[data-mode]").forEach(btn => btn.classList.toggle("active", btn.dataset.mode === "ai"));
   setupPanel.classList.remove("hidden");
   gameArea.classList.add("hidden");
   gameTopbar.classList.add("hidden");
@@ -432,6 +492,10 @@ function render() {
   blackClock.textContent = formatClock(state.clocks.b);
   whiteClock.classList.toggle("active", state.game.turn === "w" && state.gameStarted);
   blackClock.classList.toggle("active", state.game.turn === "b" && state.gameStarted);
+  if (copyLinkBtn) {
+    const canShareInvite = state.mode === "friend" && Boolean(state.roomId) && !state.gameStarted;
+    copyLinkBtn.classList.toggle("hidden", !canShareInvite);
+  }
   whiteCaptured.textContent = state.game.captured.w.map(type => pieces["b" + type]).join(" ");
   blackCaptured.textContent = state.game.captured.b.map(type => pieces["w" + type]).join(" ");
   renderMoves();
@@ -463,6 +527,10 @@ function renderMoves() {
 
 function onSquare(square) {
   if (!state.gameStarted || isLocked()) return;
+  if (state.mode === "friend" && state.roomRole !== "player") {
+    showToast("Room is full. Spectators cannot move pieces.");
+    return;
+  }
   const piece = state.game.pieceAt(square);
   const myTurnColor = state.game.turn === "w" ? "white" : "black";
   if (state.mode !== "friend" && state.mode !== "ai") return;
@@ -488,6 +556,7 @@ function isLocked() {
   const status = state.game.status().state;
   if (status !== "playing" && status !== "check") return true;
   if (state.mode === "friend") {
+    if (state.roomRole !== "player" || !state.playerId) return true;
     const myTurn = state.game.turn === "w" ? "white" : "black";
     return state.playerColor !== myTurn;
   }
@@ -500,7 +569,7 @@ async function makeMove(from, to) {
   state.legal = [];
   const promotion = promotionFor(from, to);
   if (state.mode === "friend") {
-    const response = await fetch(`/api/rooms/${state.roomId}/move`, {
+    const response = await fetch(apiUrl(`/rooms/${state.roomId}/move`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ playerId: state.playerId, from, to, promotion })
@@ -573,6 +642,9 @@ async function makeAiMove() {
 }
 
 async function getAiMove() {
+  if (state.difficulty === "easy" && Math.random() < EASY_RANDOM_MOVE_CHANCE) {
+    return state.game.bestMove("easy");
+  }
   try {
     const move = await stockfish.bestMove(state.game.fen(), state.difficulty);
     if (move) return move;
@@ -585,9 +657,9 @@ async function getAiMove() {
 function createStockfishClient() {
   const source = "https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js";
   const settings = {
-    easy: { skill: 2, moveTime: 120 },
-    medium: { skill: 8, moveTime: 320 },
-    hard: { skill: 16, moveTime: 800 }
+    easy: { skill: 0, moveTime: 90, limitStrength: true, elo: 800 },
+    medium: { skill: 4, moveTime: 320, limitStrength: true, elo: 1300 },
+    hard: { skill: 16, moveTime: 800, limitStrength: false }
   };
   let worker = null;
   let ready = false;
@@ -647,6 +719,10 @@ function createStockfishClient() {
         pending = { resolve, reject };
         engine.postMessage("ucinewgame");
         engine.postMessage(`setoption name Skill Level value ${config.skill}`);
+        engine.postMessage(`setoption name UCI_LimitStrength value ${config.limitStrength ? "true" : "false"}`);
+        if (config.limitStrength && config.elo) {
+          engine.postMessage(`setoption name UCI_Elo value ${config.elo}`);
+        }
         engine.postMessage(`position fen ${fen}`);
         engine.postMessage(`go movetime ${config.moveTime}`);
         setTimeout(() => {
@@ -675,32 +751,35 @@ function parseUciMove(moveText) {
 
 async function joinRoom(roomId) {
   state.mode = "friend";
-  state.roomId = roomId;
-  const saved = JSON.parse(sessionStorage.getItem(`room:${roomId}`) || "{}");
-  const response = await fetch(`/api/rooms/${roomId}/join`, {
+  state.roomId = normalizeRoomId(roomId);
+  const saved = JSON.parse(sessionStorage.getItem(`room:${state.roomId}`) || "{}");
+  const response = await fetch(apiUrl(`/rooms/${state.roomId}/join`), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ playerId: saved.playerId })
   });
   const data = await response.json();
   if (!response.ok && response.status !== 409) {
-    roomStatus.textContent = data.error || "Unable to join room.";
-    return;
+    throw new Error(data.error || "Unable to join room.");
   }
   if (data.playerId) {
     state.playerId = data.playerId;
     state.playerColor = data.playerColor;
+    state.roomRole = "player";
     state.orientation = data.playerColor;
-    sessionStorage.setItem(`room:${roomId}`, JSON.stringify({ playerId: data.playerId, playerColor: data.playerColor }));
+    sessionStorage.setItem(`room:${state.roomId}`, JSON.stringify({ playerId: data.playerId, playerColor: data.playerColor }));
   } else {
-    state.playerColor = saved.playerColor || "white";
+    state.playerId = null;
+    state.playerColor = "";
+    state.roomRole = "spectator";
   }
   syncRoom(data.room);
   showGame();
   copyLinkBtn.classList.remove("hidden");
-  roomStatus.textContent = data.playerId ? `Joined as ${state.playerColor}.` : "Watching a full room.";
+  roomStatus.textContent = state.roomRole === "player"
+    ? `Joined as ${state.playerColor}.`
+    : "Room is full. Watching as spectator.";
   state.gameStarted = Boolean(data.room.whitePlayer && data.room.blackPlayer);
-  state.clocks = initialClocks();
   startPolling();
   startClocks();
   render();
@@ -708,13 +787,30 @@ async function joinRoom(roomId) {
 
 function startPolling() {
   clearInterval(state.poller);
-  state.poller = setInterval(async () => {
-    if (!state.roomId) return;
-    const response = await fetch(`/api/rooms/${state.roomId}`);
-    if (!response.ok) return;
-    const data = await response.json();
-    syncRoom(data.room);
-  }, 1400);
+  let pollInFlight = false;
+  const pollNow = async () => {
+    if (!state.roomId || pollInFlight) return;
+    pollInFlight = true;
+    try {
+      const response = await fetch(apiUrl(`/rooms/${state.roomId}`));
+      if (response.status === 404) {
+        clearInterval(state.poller);
+        state.poller = null;
+        roomStatus.textContent = "Room no longer exists.";
+        showToast("Room not found.");
+        return;
+      }
+      if (!response.ok) return;
+      const data = await response.json();
+      syncRoom(data.room);
+    } catch (error) {
+      console.warn("Room polling failed.", error);
+    } finally {
+      pollInFlight = false;
+    }
+  };
+  pollNow();
+  state.poller = setInterval(pollNow, 1400);
 }
 
 function syncRoom(room) {
@@ -731,8 +827,16 @@ function syncRoom(room) {
   state.gameStarted = Boolean(room.whitePlayer && room.blackPlayer);
   if (!state.gameStarted) {
     roomStatus.textContent = "Waiting for your friend to open the link.";
+  } else if (state.roomRole === "spectator") {
+    roomStatus.textContent = "Watching live game.";
+  } else if (state.playerColor) {
+    roomStatus.textContent = `Playing as ${state.playerColor}.`;
   } else {
-    roomStatus.textContent = state.playerColor ? `Friend game. You are ${state.playerColor}.` : "Friend game.";
+    roomStatus.textContent = "Connected to room.";
+  }
+  if (copyLinkBtn) {
+    const canShareInvite = state.mode === "friend" && Boolean(state.roomId) && !state.gameStarted;
+    copyLinkBtn.classList.toggle("hidden", !canShareInvite);
   }
   render();
 }
@@ -755,13 +859,14 @@ function newGame() {
   state.legal = [];
   state.roomId = null;
   state.playerId = null;
+  state.roomRole = "none";
   state.gameStarted = false;
   state.timeWinner = null;
   state.lastMove = null;
   state.aiThinking = false;
+  state.friendRoomRequestSeq += 1;
   state.clocks = initialClocks();
   localStorage.removeItem("worldChessGame");
-  showFriendShare(state.mode === "friend");
   if (resumeBtn) resumeBtn.classList.add("hidden");
   history.replaceState(null, "", location.pathname);
   showMenu();
@@ -835,13 +940,14 @@ function showToast(message) {
   showToast.timer = setTimeout(() => toast.classList.remove("show"), 1600);
 }
 
-try {
-  init();
-  window.__WORLD_CHESS_READY = true;
-} catch (error) {
-  window.__WORLD_CHESS_READY = false;
-  console.error(error);
-  if (toast) {
-    showToast("Startup failed. Check console.");
-  }
-}
+init()
+  .then(() => {
+    window.__WORLD_CHESS_READY = true;
+  })
+  .catch(error => {
+    window.__WORLD_CHESS_READY = false;
+    console.error(error);
+    if (toast) {
+      showToast("Startup failed. Check console.");
+    }
+  });
