@@ -338,6 +338,11 @@ p {
   gap: 8px;
 }
 
+#setupPanel.start-screen .friend-share-status {
+  justify-content: center;
+  text-align: center;
+}
+
 .spinner {
   width: 12px;
   height: 12px;

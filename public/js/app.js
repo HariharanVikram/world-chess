@@ -35,7 +35,8 @@ const state = {
   lastMove: null,
   lastAnimatedMoveKey: null,
   aiThinking: false,
-  friendRoomRequestSeq: 0
+  friendRoomRequestSeq: 0,
+  debugMode: false
 };
 
 const stockfish = createStockfishClient();
@@ -64,8 +65,6 @@ const loadingOverlay = document.querySelector("#loadingOverlay");
 const turnIndicator = document.querySelector("#turnIndicator");
 const waitingBadge = document.querySelector("#waitingBadge");
 const friendShareBox = document.querySelector("#friendShareBox");
-const friendLinkInput = document.querySelector("#friendLinkInput");
-const copyFriendLinkBtn = document.querySelector("#copyFriendLinkBtn");
 const friendShareStatus = document.querySelector("#friendShareStatus");
 const themeSelectSetup = document.querySelector("#themeSelectSetup");
 const themeSelectGame = document.querySelector("#themeSelectGame");
@@ -81,8 +80,20 @@ async function init() {
   restorePreferences();
   if (resumeBtn) resumeBtn.classList.toggle("hidden", !localStorage.getItem("worldChessGame"));
   const params = new URLSearchParams(location.search);
+  state.debugMode = params.get("debug") === "1";
   const room = normalizeRoomId(params.get("room"));
   if (room) {
+    const saved = JSON.parse(sessionStorage.getItem(`room:${room}`) || "{}");
+    const knownPlayer = Boolean(saved.playerId);
+    if (!knownPlayer) {
+      const confirmed = window.confirm("Join this invite room as a player?");
+      if (!confirmed) {
+        await runLoadingTransition(async () => {
+          render();
+        });
+        return;
+      }
+    }
     await runLoadingTransition(async () => {
       try {
         await joinRoom(room);
@@ -112,11 +123,27 @@ function basePath() {
 
 function apiUrl(endpoint) {
   const suffix = endpoint.startsWith("/") ? endpoint.slice(1) : endpoint;
-  return `${basePath()}api/${suffix}`;
+  const base = `${basePath()}api/${suffix}`;
+  if (!state.debugMode) return base;
+  return base.includes("?") ? `${base}&debug=1` : `${base}?debug=1`;
 }
 
 function normalizeRoomId(value) {
   return String(value || "").trim();
+}
+
+function parseMoveCoordEntry(entry) {
+  const raw = String(entry || "").trim();
+  if (!raw) return null;
+  const match = raw.match(/^([a-h][1-8])\s+([a-h][1-8])/i);
+  if (!match) return null;
+  return { from: match[1].toLowerCase(), to: match[2].toLowerCase() };
+}
+
+function lastMoveFromGameData(gameData) {
+  const coords = Array.isArray(gameData?.moveCoords) ? gameData.moveCoords : [];
+  if (!coords.length) return null;
+  return parseMoveCoordEntry(coords[coords.length - 1]);
 }
 
 function bindControls() {
@@ -130,7 +157,6 @@ function bindControls() {
         state.roomId = null;
         state.playerId = null;
         state.roomRole = "none";
-        if (friendLinkInput) friendLinkInput.value = "";
         setFriendShareStatus("Press Start to generate a fresh invite link.", false);
       } else {
         state.friendRoomRequestSeq += 1;
@@ -148,7 +174,6 @@ function bindControls() {
         state.roomId = null;
         state.playerId = null;
         state.roomRole = "none";
-        if (friendLinkInput) friendLinkInput.value = "";
         setFriendShareStatus("Press Start to generate a fresh invite link.", false);
       }
     });
@@ -162,7 +187,6 @@ function bindControls() {
         state.roomId = null;
         state.playerId = null;
         state.roomRole = "none";
-        if (friendLinkInput) friendLinkInput.value = "";
         setFriendShareStatus("Press Start to generate a fresh invite link.", false);
       }
     });
@@ -187,7 +211,6 @@ function bindControls() {
     });
   }
   if (copyLinkBtn) copyLinkBtn.addEventListener("click", copyRoomLink);
-  if (copyFriendLinkBtn) copyFriendLinkBtn.addEventListener("click", copyRoomLink);
   [themeSelectSetup, themeSelectGame].filter(Boolean).forEach(select => {
     select.addEventListener("change", () => {
       setTheme(select.value);
@@ -206,14 +229,31 @@ function restorePreferences() {
 }
 
 function roomLink(roomId = state.roomId) {
-  return roomId ? `${location.origin}${basePath()}?room=${roomId}` : "";
+  if (!roomId) return "";
+  const debugQuery = state.debugMode ? "&debug=1" : "";
+  return `${location.origin}${basePath()}?room=${roomId}${debugQuery}`;
+}
+
+function debugLog(label, data) {
+  if (!state.debugMode || !data) return;
+  console.info(`[WorldChess debug] ${label}`, data);
+}
+
+function localDebugState() {
+  return {
+    roomId: state.roomId,
+    playerId: state.playerId,
+    roomRole: state.roomRole,
+    playerColor: state.playerColor,
+    orientation: state.orientation,
+    gameStarted: state.gameStarted
+  };
 }
 
 function showFriendShare(visible) {
   if (!friendShareBox) return;
   friendShareBox.classList.toggle("hidden", !visible);
   if (!visible) {
-    if (friendLinkInput) friendLinkInput.value = "";
     if (friendShareStatus) friendShareStatus.innerHTML = "";
   }
 }
@@ -234,12 +274,10 @@ async function ensureFriendRoom(forceNew = false) {
     state.roomRole = "none";
   }
   if (state.roomId && state.playerId && !forceNew) {
-    if (friendLinkInput) friendLinkInput.value = roomLink();
-    setFriendShareStatus("Share this link. We will start when your friend joins.", false);
+    setFriendShareStatus("Press Start to generate a fresh invite link.", false);
     return;
   }
   setFriendShareStatus("Preparing secure invite link", true);
-  if (friendLinkInput) friendLinkInput.value = "";
   try {
     const response = await fetch(apiUrl("/rooms"), {
       method: "POST",
@@ -248,6 +286,7 @@ async function ensureFriendRoom(forceNew = false) {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Could not create friend room.");
+    debugLog("createRoom", data.debug);
     if (state.mode !== "friend" || requestSeq !== state.friendRoomRequestSeq) return;
     state.roomId = data.room.id;
     state.playerId = data.playerId;
@@ -256,8 +295,7 @@ async function ensureFriendRoom(forceNew = false) {
     state.orientation = data.playerColor;
     state.game = ChessGame.fromJSON(data.room.game);
     sessionStorage.setItem(`room:${state.roomId}`, JSON.stringify({ playerId: state.playerId, playerColor: state.playerColor }));
-    if (friendLinkInput) friendLinkInput.value = roomLink();
-    setFriendShareStatus("Share this link. We will start when your friend joins.", false);
+    setFriendShareStatus("Invite room created.", false);
   } catch (error) {
     if (requestSeq !== state.friendRoomRequestSeq) return;
     setFriendShareStatus("Could not generate link. Try again.", false);
@@ -759,6 +797,7 @@ async function joinRoom(roomId) {
     body: JSON.stringify({ playerId: saved.playerId })
   });
   const data = await response.json();
+  debugLog("joinRoom", data.debug);
   if (!response.ok && response.status !== 409) {
     throw new Error(data.error || "Unable to join room.");
   }
@@ -774,6 +813,7 @@ async function joinRoom(roomId) {
     state.roomRole = "spectator";
   }
   syncRoom(data.room);
+  debugLog("localStateAfterJoin", localDebugState());
   showGame();
   copyLinkBtn.classList.remove("hidden");
   roomStatus.textContent = state.roomRole === "player"
@@ -802,6 +842,7 @@ function startPolling() {
       }
       if (!response.ok) return;
       const data = await response.json();
+      debugLog("pollRoom", data.debug);
       syncRoom(data.room);
     } catch (error) {
       console.warn("Room polling failed.", error);
@@ -815,7 +856,19 @@ function startPolling() {
 
 function syncRoom(room) {
   if (!room) return;
+  const inferredColor = state.playerId
+    ? (room.whitePlayer === state.playerId ? "white" : room.blackPlayer === state.playerId ? "black" : "")
+    : "";
+  if (inferredColor) {
+    state.roomRole = "player";
+    state.playerColor = inferredColor;
+    state.orientation = inferredColor;
+  } else if (state.mode === "friend" && state.roomRole !== "none") {
+    state.roomRole = "spectator";
+    if (!state.playerId) state.playerColor = "";
+  }
   state.game = ChessGame.fromJSON(room.game);
+  state.lastMove = lastMoveFromGameData(room.game);
   state.format = room.format || state.format;
   state.timeWinner = room.timeWinner || null;
   if (room.clocks) {
@@ -838,6 +891,7 @@ function syncRoom(room) {
     const canShareInvite = state.mode === "friend" && Boolean(state.roomId) && !state.gameStarted;
     copyLinkBtn.classList.toggle("hidden", !canShareInvite);
   }
+  debugLog("localStateAfterSync", localDebugState());
   render();
 }
 

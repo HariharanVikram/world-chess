@@ -139,6 +139,63 @@ function send(res, status, body, type = "application/json; charset=utf-8") {
   res.end(typeof body === "string" ? body : JSON.stringify(body));
 }
 
+function parseCookies(req) {
+  const raw = String(req.headers.cookie || "");
+  const out = {};
+  for (const part of raw.split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (!key) continue;
+    out[key] = decodeURIComponent(rest.join("=") || "");
+  }
+  return out;
+}
+
+function ensureClientId(req, res) {
+  const cookies = parseCookies(req);
+  if (cookies.wc_client) return cookies.wc_client;
+  const clientId = crypto.randomUUID();
+  const cookie = `wc_client=${encodeURIComponent(clientId)}; Path=/; Max-Age=2592000; SameSite=Lax; HttpOnly`;
+  const existing = res.getHeader("Set-Cookie");
+  if (!existing) {
+    res.setHeader("Set-Cookie", cookie);
+  } else if (Array.isArray(existing)) {
+    res.setHeader("Set-Cookie", [...existing, cookie]);
+  } else {
+    res.setHeader("Set-Cookie", [existing, cookie]);
+  }
+  return clientId;
+}
+
+function shortId(value) {
+  const text = String(value || "");
+  if (!text) return "";
+  return text.length <= 12 ? text : `${text.slice(0, 8)}...${text.slice(-4)}`;
+}
+
+function diagnosticsEnabled(req, url) {
+  if (process.env.DEBUG_MULTIPLAYER === "1") return true;
+  const header = String(req.headers["x-worldchess-debug"] || "").trim();
+  if (header === "1" || header.toLowerCase() === "true") return true;
+  return String(url.searchParams.get("debug") || "") === "1";
+}
+
+function roomDiagnostics(room, extra = {}) {
+  const claims = room && room.clientClaims && typeof room.clientClaims === "object" ? room.clientClaims : {};
+  const claimPairs = Object.entries(claims).map(([clientId, playerId]) => ({
+    clientId: shortId(clientId),
+    playerId: shortId(playerId),
+    seat: room?.whitePlayer === playerId ? "white" : room?.blackPlayer === playerId ? "black" : "none"
+  }));
+  return {
+    roomId: room ? room.id : null,
+    whitePlayer: shortId(room?.whitePlayer),
+    blackPlayer: shortId(room?.blackPlayer),
+    claimCount: claimPairs.length,
+    claims: claimPairs,
+    ...extra
+  };
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let raw = "";
@@ -221,18 +278,25 @@ function tickRoom(room) {
 }
 
 async function handleApi(req, res, url) {
+  const debugOn = diagnosticsEnabled(req, url);
+
   if (requiresDurableStore) {
-    send(res, 503, {
+    const payload = {
       error: "Multiplayer is unavailable until KV_REST_API_URL and KV_REST_API_TOKEN are configured."
-    });
+    };
+    if (debugOn) payload.debug = { requiresDurableStore, kvEnabled, runningOnVercel };
+    send(res, 503, payload);
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/rooms") {
     const body = await readBody(req);
+    const clientId = ensureClientId(req, res);
     const roomId = await newUniqueRoomId();
     const hostColor = normalizeColor(body.colorChoice);
     const playerId = crypto.randomUUID();
+    const claims = {};
+    claims[clientId] = playerId;
     const room = {
       id: roomId,
       format: body.format || "10",
@@ -243,18 +307,28 @@ async function handleApi(req, res, url) {
       timeWinner: null,
       whitePlayer: hostColor === "white" ? playerId : null,
       blackPlayer: hostColor === "black" ? playerId : null,
+      clientClaims: claims,
       game: new ChessGame().toJSON()
     };
     await setRoom(room);
-    send(res, 201, {
+    const payload = {
       playerId,
       playerColor: hostColor,
       room: publicRoom(room)
-    });
+    };
+    if (debugOn) {
+      payload.debug = roomDiagnostics(room, {
+        action: "create",
+        assignedHostColor: hostColor,
+        requestClientId: shortId(clientId),
+        requestPlayerId: shortId(playerId)
+      });
+    }
+    send(res, 201, payload);
     return;
   }
 
-  const roomMatch = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9_-]+)(?:\/(join|move|reset))?$/);
+  const roomMatch = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9_-]+)(?:\/(join|move|reset|debug))?$/);
   if (!roomMatch) {
     send(res, 404, { error: "Not found" });
     return;
@@ -272,7 +346,23 @@ async function handleApi(req, res, url) {
       room.updatedAt = Date.now();
       await setRoom(room);
     }
-    send(res, 200, { room: publicRoom(room) });
+    const payload = { room: publicRoom(room) };
+    if (debugOn) {
+      payload.debug = roomDiagnostics(room, {
+        action: "get"
+      });
+    }
+    send(res, 200, payload);
+    return;
+  }
+
+  if (req.method === "GET" && action === "debug") {
+    const room = await getRoom(roomId);
+    if (!room) {
+      send(res, 404, { error: "Room not found" });
+      return;
+    }
+    send(res, 200, { debug: roomDiagnostics(room, { action: "debug" }), room: publicRoom(room) });
     return;
   }
 
@@ -287,14 +377,48 @@ async function handleApi(req, res, url) {
         }
 
         if (action === "join") {
+          const clientId = ensureClientId(req, res);
+          if (!room.clientClaims || typeof room.clientClaims !== "object") room.clientClaims = {};
           let playerId = body.playerId;
           if (playerId && (room.whitePlayer === playerId || room.blackPlayer === playerId)) {
+            room.clientClaims[clientId] = playerId;
             const playerColor = room.whitePlayer === playerId ? "white" : "black";
             if (tickRoom(room)) {
               room.updatedAt = Date.now();
-              await setRoom(room);
             }
-            send(res, 200, { playerId, playerColor, room: publicRoom(room) });
+            await setRoom(room);
+            const payload = { playerId, playerColor, room: publicRoom(room) };
+            if (debugOn) {
+              payload.debug = roomDiagnostics(room, {
+                action: "join",
+                decision: "resumeByPlayerId",
+                requestClientId: shortId(clientId),
+                requestPlayerId: shortId(body.playerId),
+                assignedPlayerId: shortId(playerId),
+                assignedColor: playerColor
+              });
+            }
+            send(res, 200, payload);
+            return;
+          }
+
+          const claimedId = room.clientClaims[clientId];
+          if (claimedId && (room.whitePlayer === claimedId || room.blackPlayer === claimedId)) {
+            const playerColor = room.whitePlayer === claimedId ? "white" : "black";
+            if (tickRoom(room)) room.updatedAt = Date.now();
+            await setRoom(room);
+            const payload = { playerId: claimedId, playerColor, room: publicRoom(room) };
+            if (debugOn) {
+              payload.debug = roomDiagnostics(room, {
+                action: "join",
+                decision: "resumeByClientClaim",
+                requestClientId: shortId(clientId),
+                requestPlayerId: shortId(body.playerId),
+                assignedPlayerId: shortId(claimedId),
+                assignedColor: playerColor
+              });
+            }
+            send(res, 200, payload);
             return;
           }
 
@@ -304,16 +428,38 @@ async function handleApi(req, res, url) {
               room.updatedAt = Date.now();
               await setRoom(room);
             }
-            send(res, 409, { error: "This room already has two players.", room: publicRoom(room) });
+            const payload = { error: "This room already has two players.", room: publicRoom(room) };
+            if (debugOn) {
+              payload.debug = roomDiagnostics(room, {
+                action: "join",
+                decision: "roomFull",
+                requestClientId: shortId(clientId),
+                requestPlayerId: shortId(body.playerId),
+                attemptedSeat: openColor
+              });
+            }
+            send(res, 409, payload);
             return;
           }
 
           playerId = crypto.randomUUID();
           room[`${openColor}Player`] = playerId;
+          room.clientClaims[clientId] = playerId;
           room.updatedAt = Date.now();
           room.lastTick = Date.now();
           await setRoom(room);
-          send(res, 200, { playerId, playerColor: openColor, room: publicRoom(room) });
+          const payload = { playerId, playerColor: openColor, room: publicRoom(room) };
+          if (debugOn) {
+            payload.debug = roomDiagnostics(room, {
+              action: "join",
+              decision: "assignedOpenSeat",
+              requestClientId: shortId(clientId),
+              requestPlayerId: shortId(body.playerId),
+              assignedPlayerId: shortId(playerId),
+              assignedColor: openColor
+            });
+          }
+          send(res, 200, payload);
           return;
         }
 

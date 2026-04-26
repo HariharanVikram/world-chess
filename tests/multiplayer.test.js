@@ -55,6 +55,23 @@ async function jsonRequest(baseUrl, endpoint, options = {}) {
   return { response, data };
 }
 
+async function jsonRequestWithCookie(baseUrl, endpoint, cookieJar, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (cookieJar.value) headers.Cookie = cookieJar.value;
+  const response = await fetch(`${baseUrl}${endpoint}`, { ...options, headers });
+  const setCookie = response.headers.get("set-cookie");
+  if (setCookie) {
+    cookieJar.value = setCookie.split(";")[0];
+  }
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+  return { response, data };
+}
+
 test("friend multiplayer flow keeps room and player state consistent", async () => {
   const server = await startServer();
   try {
@@ -131,6 +148,70 @@ test("subpath-prefixed API routes are accepted", async () => {
     const room = await jsonRequest(server.baseUrl, `/world-chess/api/rooms/${roomId}`);
     assert.equal(room.response.status, 200);
     assert.equal(room.data.room.id, roomId);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("repeat join from same client keeps assigned seat", async () => {
+  const server = await startServer();
+  try {
+    const hostCookies = { value: "" };
+    const friendCookies = { value: "" };
+    const create = await jsonRequestWithCookie(server.baseUrl, "/api/rooms", hostCookies, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ format: "10", colorChoice: "white" })
+    });
+    assert.equal(create.response.status, 201);
+    const roomId = create.data.room.id;
+
+    const firstJoin = await jsonRequestWithCookie(server.baseUrl, `/api/rooms/${roomId}/join`, friendCookies, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(firstJoin.response.status, 200);
+    assert.equal(firstJoin.data.playerColor, "black");
+
+    const secondJoin = await jsonRequestWithCookie(server.baseUrl, `/api/rooms/${roomId}/join`, friendCookies, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(secondJoin.response.status, 200);
+    assert.equal(secondJoin.data.playerColor, "black");
+    assert.equal(secondJoin.data.playerId, firstJoin.data.playerId);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("debug mode returns join diagnostics", async () => {
+  const server = await startServer();
+  try {
+    const create = await jsonRequest(server.baseUrl, "/api/rooms?debug=1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ format: "10", colorChoice: "white" })
+    });
+    assert.equal(create.response.status, 201);
+    assert.equal(create.data.debug.action, "create");
+    const roomId = create.data.room.id;
+
+    const join = await jsonRequest(server.baseUrl, `/api/rooms/${roomId}/join?debug=1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(join.response.status, 200);
+    assert.equal(join.data.debug.action, "join");
+    assert.ok(join.data.debug.decision);
+
+    const debugRoom = await jsonRequest(server.baseUrl, `/api/rooms/${roomId}/debug?debug=1`);
+    assert.equal(debugRoom.response.status, 200);
+    assert.equal(debugRoom.data.debug.action, "debug");
+    assert.ok(Array.isArray(debugRoom.data.debug.claims));
   } finally {
     await server.stop();
   }

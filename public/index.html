@@ -33,20 +33,6 @@
 
         <div class="start-card">
           <div class="control-group">
-            <span class="label">Play against</span>
-            <div class="segmented" role="tablist" aria-label="Game mode">
-              <button type="button" class="active" data-mode="ai">AI</button>
-              <button type="button" data-mode="friend">Invite Friend</button>
-            </div>
-          </div>
-          <div id="friendShareBox" class="friend-share hidden" aria-live="polite">
-            <div class="friend-share-row">
-              <input id="friendLinkInput" type="text" readonly aria-label="Invite friend">
-              <button id="copyFriendLinkBtn" type="button" class="secondary">Copy</button>
-            </div>
-            <div class="friend-share-status" id="friendShareStatus"><span class="spinner"></span>Preparing secure invite link</div>
-          </div>
-          <div class="control-group">
             <span class="label">Select format</span>
             <div class="chips" id="formatChoices">
               <button type="button" data-format="5">5 min</button>
@@ -63,6 +49,13 @@
               <button type="button" data-color="random">Random</button>
             </div>
           </div>
+          <div class="control-group">
+            <span class="label">Play against</span>
+            <div class="segmented" role="tablist" aria-label="Game mode">
+              <button type="button" class="active" data-mode="ai">AI</button>
+              <button type="button" data-mode="friend">Invite Friend</button>
+            </div>
+          </div>
           <div class="control-group" id="difficultyGroup">
             <span class="label">Difficulty</span>
             <div class="chips" id="difficultyChoices">
@@ -70,6 +63,9 @@
               <button type="button" data-difficulty="medium" class="active">Medium</button>
               <button type="button" data-difficulty="hard">Hard</button>
             </div>
+          </div>
+          <div id="friendShareBox" class="friend-share hidden" aria-live="polite">
+            <div class="friend-share-status" id="friendShareStatus">Press Start to generate a fresh invite link.</div>
           </div>
           <div class="start-actions">
             <button id="startBtn" type="button" class="primary">Start</button>
