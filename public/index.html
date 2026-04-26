@@ -14,6 +14,10 @@
           <h1>World Chess</h1>
           <p id="roomStatus">Free chess. No login. Play anywhere.</p>
         </div>
+        <div class="topbar-state">
+          <div id="waitingBadge" class="waiting-badge hidden"><span class="spinner"></span>Waiting for friend to join</div>
+          <div id="turnIndicator" class="turn-indicator hidden">White to move</div>
+        </div>
         <div class="actions">
           <button id="newGameBtn" type="button">New game</button>
           <button id="copyLinkBtn" type="button" class="secondary hidden">Copy link</button>
@@ -24,26 +28,26 @@
         <div class="brand-block">
           <span class="eyebrow">No-login global chess</span>
           <h1>World Chess</h1>
-          <p>Start a game in seconds, invite a friend with a link, or challenge Stockfish-powered AI.</p>
+          <p>Play the machine. Challenge a friend. Rule the board.</p>
         </div>
 
         <div class="start-card">
           <div class="control-group">
-            <span class="label">Game</span>
+            <span class="label">Play against</span>
             <div class="segmented" role="tablist" aria-label="Game mode">
               <button type="button" class="active" data-mode="ai">AI</button>
-              <button type="button" data-mode="friend">Friend link</button>
+              <button type="button" data-mode="friend">Invite Friend</button>
             </div>
           </div>
           <div id="friendShareBox" class="friend-share hidden" aria-live="polite">
             <div class="friend-share-row">
-              <input id="friendLinkInput" type="text" readonly aria-label="Friend link">
+              <input id="friendLinkInput" type="text" readonly aria-label="Invite friend">
               <button id="copyFriendLinkBtn" type="button" class="secondary">Copy</button>
             </div>
             <div class="friend-share-status" id="friendShareStatus"><span class="spinner"></span>Preparing secure invite link</div>
           </div>
           <div class="control-group">
-            <span class="label">Clock</span>
+            <span class="label">Select format</span>
             <div class="chips" id="formatChoices">
               <button type="button" data-format="5">5 min</button>
               <button type="button" data-format="10" class="active">10 min</button>
@@ -52,7 +56,7 @@
             </div>
           </div>
           <div class="control-group">
-            <span class="label">Side</span>
+            <span class="label">Choose color</span>
             <div class="chips" id="colorChoices">
               <button type="button" data-color="white" class="active">White</button>
               <button type="button" data-color="black">Black</button>
@@ -60,7 +64,7 @@
             </div>
           </div>
           <div class="control-group" id="difficultyGroup">
-            <span class="label">AI</span>
+            <span class="label">Difficulty</span>
             <div class="chips" id="difficultyChoices">
               <button type="button" data-difficulty="easy">Easy</button>
               <button type="button" data-difficulty="medium" class="active">Medium</button>
@@ -76,7 +80,7 @@
 
       <section class="game-area hidden" id="gameArea">
         <aside class="panel left-panel">
-          <div class="clock" id="blackClock">10:00</div>
+          <div class="clock" id="whiteClock">10:00</div>
           <div class="captured" id="whiteCaptured" aria-label="White captures"></div>
           <div class="status" id="statusText">Choose a format to begin.</div>
           <div>
@@ -86,10 +90,6 @@
         </aside>
 
         <div class="board-wrap">
-          <div class="board-header">
-            <div id="waitingBadge" class="waiting-badge hidden"><span class="spinner"></span>Waiting for friend to join</div>
-            <div id="turnIndicator" class="turn-indicator hidden">White to move</div>
-          </div>
           <div class="rank-labels" id="rankLabels"></div>
           <div id="board" class="board theme-classic" aria-label="Chessboard"></div>
           <div class="file-labels" id="fileLabels"></div>
@@ -106,7 +106,7 @@
         </div>
 
         <aside class="panel right-panel">
-          <div class="clock" id="whiteClock">10:00</div>
+          <div class="clock" id="blackClock">10:00</div>
           <div class="captured" id="blackCaptured" aria-label="Black captures"></div>
           <div>
             <span class="label">Black</span>
@@ -116,6 +116,20 @@
 
       </section>
     </main>
+
+    <div class="loading-overlay hidden" id="loadingOverlay" aria-live="polite" aria-label="Loading game">
+      <div class="loading-shell">
+        <div class="loading-widget" aria-hidden="true">
+          <span class="orbit orbit-a"></span>
+          <span class="orbit orbit-b"></span>
+          <span class="core"></span>
+        </div>
+        <div class="loading-credit">
+          <p>Brought to you by</p>
+          <strong>Vikram Hariharan</strong>
+        </div>
+      </div>
+    </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script src="js/chess-core.js?v=20260426l"></script>

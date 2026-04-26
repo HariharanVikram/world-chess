@@ -32,10 +32,13 @@ const state = {
   gameStarted: false,
   orientation: "white",
   lastMove: null,
+  lastAnimatedMoveKey: null,
   aiThinking: false
 };
 
 const stockfish = createStockfishClient();
+const AI_RESPONSE_DELAY_MS = 560;
+const AI_MIN_THINK_MS = 750;
 
 const boardEl = document.querySelector("#board");
 const gameArea = document.querySelector("#gameArea");
@@ -54,6 +57,7 @@ const startBtn = document.querySelector("#startBtn");
 const resumeBtn = document.querySelector("#resumeBtn");
 const newGameBtn = document.querySelector("#newGameBtn");
 const toast = document.querySelector("#toast");
+const loadingOverlay = document.querySelector("#loadingOverlay");
 const turnIndicator = document.querySelector("#turnIndicator");
 const waitingBadge = document.querySelector("#waitingBadge");
 const friendShareBox = document.querySelector("#friendShareBox");
@@ -63,6 +67,7 @@ const friendShareStatus = document.querySelector("#friendShareStatus");
 const themeSelectSetup = document.querySelector("#themeSelectSetup");
 const themeSelectGame = document.querySelector("#themeSelectGame");
 const difficultyGroup = document.querySelector("#difficultyGroup");
+let loadingTransitionInFlight = false;
 
 function init() {
   if (!boardEl || !setupPanel || !startBtn) {
@@ -124,9 +129,19 @@ function bindControls() {
       state.difficulty = btn.dataset.difficulty;
     });
   });
-  if (startBtn) startBtn.addEventListener("click", startGame);
+  if (startBtn) {
+    startBtn.addEventListener("click", async () => {
+      if (loadingTransitionInFlight) return;
+      await runLoadingTransition(startGame);
+    });
+  }
   if (resumeBtn) resumeBtn.addEventListener("click", restoreLocalGame);
-  if (newGameBtn) newGameBtn.addEventListener("click", newGame);
+  if (newGameBtn) {
+    newGameBtn.addEventListener("click", async () => {
+      if (loadingTransitionInFlight) return;
+      await runLoadingTransition(newGame);
+    });
+  }
   if (copyLinkBtn) copyLinkBtn.addEventListener("click", copyRoomLink);
   if (copyFriendLinkBtn) copyFriendLinkBtn.addEventListener("click", copyRoomLink);
   [themeSelectSetup, themeSelectGame].filter(Boolean).forEach(select => {
@@ -198,12 +213,26 @@ async function ensureFriendRoom(forceNew = false) {
 
 function updateTopIndicators() {
   if (!turnIndicator || !waitingBadge) return;
-  const active = state.gameStarted && !state.timeWinner;
+  const status = state.game.status();
   const waitingForFriend = state.mode === "friend" && !state.gameStarted && Boolean(state.roomId);
+  const checkmateWinner = state.game.turn === "w" ? "Black" : "White";
+  const formattedStatusText = String(status.text || "").replace(/\b(black|white)\b/g, side =>
+    side[0].toUpperCase() + side.slice(1).toLowerCase()
+  );
+  const resultText = state.timeWinner
+    ? `Time up. ${sideLabel(state.timeWinner)} wins.`
+    : status.state === "checkmate"
+      ? `Checkmate! ${checkmateWinner} wins.`
+      : (status.state === "stalemate" || status.state === "draw")
+        ? formattedStatusText
+        : "";
+  const active = state.gameStarted && !waitingForFriend && !resultText;
+  const showTurnIndicator = active || Boolean(resultText);
   waitingBadge.classList.toggle("hidden", !waitingForFriend);
-  turnIndicator.classList.toggle("hidden", !active);
-  if (active) {
-    turnIndicator.textContent = `${sideLabel(state.game.turn)} to move`;
+  turnIndicator.classList.toggle("hidden", !showTurnIndicator);
+  turnIndicator.classList.toggle("result-checkmate", status.state === "checkmate" && Boolean(resultText));
+  if (showTurnIndicator) {
+    turnIndicator.textContent = resultText || `${sideLabel(state.game.turn)} to move`;
   }
 }
 
@@ -269,7 +298,7 @@ async function startGame() {
     state.playerColor = chooseColor();
     state.orientation = state.playerColor;
     roomStatus.textContent = `Playing AI as ${state.playerColor}.`;
-    if (state.playerColor === "black") setTimeout(makeAiMove, 350);
+    if (state.playerColor === "black") setTimeout(makeAiMove, AI_RESPONSE_DELAY_MS);
   }
 
   showGame();
@@ -308,6 +337,54 @@ function buildLabels(fileIndexes) {
   document.querySelector("#fileLabels").innerHTML = files.map(f => `<span>${f}</span>`).join("");
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function runLoadingTransition(action) {
+  if (!loadingOverlay) {
+    await action();
+    return;
+  }
+  loadingTransitionInFlight = true;
+  loadingOverlay.classList.remove("hidden");
+  requestAnimationFrame(() => loadingOverlay.classList.add("show"));
+  try {
+    await sleep(2000);
+    await action();
+  } finally {
+    loadingOverlay.classList.remove("show");
+    setTimeout(() => {
+      loadingOverlay.classList.add("hidden");
+      loadingTransitionInFlight = false;
+    }, 360);
+  }
+}
+
+function animateLastMovePiece() {
+  if (!state.lastMove || !boardEl) return;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const fromSquare = boardEl.querySelector(`[data-square="${state.lastMove.from}"]`);
+  const toSquare = boardEl.querySelector(`[data-square="${state.lastMove.to}"]`);
+  const pieceEl = toSquare?.querySelector(".piece");
+  if (!fromSquare || !toSquare || !pieceEl) return;
+  const fromRect = fromSquare.getBoundingClientRect();
+  const toRect = toSquare.getBoundingClientRect();
+  const dx = fromRect.left - toRect.left;
+  const dy = fromRect.top - toRect.top;
+  pieceEl.animate(
+    [
+      { transform: `translate(${dx}px, ${dy}px)` },
+      { transform: "translate(0, 0)" }
+    ],
+    {
+      duration: 260,
+      easing: "cubic-bezier(0.2, 0.75, 0.2, 1)",
+      fill: "none"
+    }
+  );
+}
+
 function render() {
   const ranks = state.orientation === "white" ? [...Array(8).keys()] : [...Array(8).keys()].reverse();
   const files = state.orientation === "white" ? [...Array(8).keys()] : [...Array(8).keys()].reverse();
@@ -326,6 +403,7 @@ function render() {
       button.setAttribute("aria-label", piece ? `${square} ${piece.color === "w" ? "white" : "black"} ${piece.type}` : square);
       if (state.selected === square) button.classList.add("selected");
       if (state.lastMove && state.lastMove.from === square) button.classList.add("last-move-origin");
+      if (state.lastMove && state.lastMove.to === square) button.classList.add("last-move-destination");
       if (state.legal.some(move => move.to === square && move.capture)) button.classList.add("capture");
       else if (state.legal.some(move => move.to === square)) button.classList.add("legal");
       if (checkSquare === square) button.classList.add("check-king");
@@ -340,14 +418,16 @@ function render() {
     });
   });
 
+  const moveCount = Array.isArray(state.game.moveCoords) ? state.game.moveCoords.length : 0;
+  const moveKey = state.lastMove ? `${state.lastMove.from}-${state.lastMove.to}-${moveCount}` : null;
+  if (moveKey && moveKey !== state.lastAnimatedMoveKey) {
+    animateLastMovePiece();
+    state.lastAnimatedMoveKey = moveKey;
+  }
+
   const status = state.game.status();
-  const showMainStatus = status.state !== "playing";
-  statusText.textContent = state.timeWinner
-    ? `Time up. ${sideLabel(state.timeWinner)} wins.`
-    : showMainStatus
-      ? status.text
-      : "";
-  statusText.classList.toggle("check", status.state === "check" || status.state === "checkmate");
+  statusText.textContent = status.state === "check" ? status.text : "";
+  statusText.classList.toggle("check", status.state === "check");
   whiteClock.textContent = formatClock(state.clocks.w);
   blackClock.textContent = formatClock(state.clocks.b);
   whiteClock.classList.toggle("active", state.game.turn === "w" && state.gameStarted);
@@ -443,7 +523,7 @@ async function makeMove(from, to) {
     saveLocalGame();
     render();
     if (state.game.status().state === "playing" || state.game.status().state === "check") {
-      setTimeout(makeAiMove, 260);
+      setTimeout(makeAiMove, AI_RESPONSE_DELAY_MS);
     }
   }
 }
@@ -466,7 +546,10 @@ async function makeAiMove() {
   if (state.game.turn !== aiColor) return;
   state.aiThinking = true;
   render();
+  const thinkStart = performance.now();
   const move = await getAiMove();
+  const elapsed = performance.now() - thinkStart;
+  if (elapsed < AI_MIN_THINK_MS) await sleep(AI_MIN_THINK_MS - elapsed);
   const stillLegal = move && state.game.legalMoves(move.from).some(candidate => candidate.to === move.to);
   if (!stillLegal) {
     console.warn("AI rejected an illegal candidate move", move);
