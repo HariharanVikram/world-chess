@@ -35,6 +35,7 @@ const state = {
   lastMove: null,
   lastAnimatedMoveKey: null,
   aiThinking: false,
+  friendMoveInFlight: null,
   friendRoomRequestSeq: 0,
   debugMode: false
 };
@@ -364,6 +365,7 @@ async function startGame() {
   state.timeWinner = null;
   state.lastMove = null;
   state.aiThinking = false;
+  state.friendMoveInFlight = null;
   state.clocks = initialClocks();
   clearInterval(state.poller);
   state.poller = null;
@@ -591,6 +593,7 @@ function onSquare(square) {
 
 function isLocked() {
   if (state.aiThinking) return true;
+  if (state.friendMoveInFlight) return true;
   const status = state.game.status().state;
   if (status !== "playing" && status !== "check") return true;
   if (state.mode === "friend") {
@@ -607,18 +610,46 @@ async function makeMove(from, to) {
   state.legal = [];
   const promotion = promotionFor(from, to);
   if (state.mode === "friend") {
-    const response = await fetch(apiUrl(`/rooms/${state.roomId}/move`), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ playerId: state.playerId, from, to, promotion })
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      showToast(data.error || "Move rejected.");
+    if (state.friendMoveInFlight) return;
+
+    const snapshot = state.game.toJSON();
+    const localResult = state.game.move(from, to, promotion);
+    if (!localResult.ok) {
+      showToast(localResult.error || "Move rejected.");
+      render();
       return;
     }
-    state.lastMove = data.move ? { from: data.move.from, to: data.move.to } : { from, to };
-    syncRoom(data.room);
+
+    state.friendMoveInFlight = { snapshot };
+    state.lastMove = { from, to };
+    render();
+
+    try {
+      const response = await fetch(apiUrl(`/rooms/${state.roomId}/move`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playerId: state.playerId, from, to, promotion })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        state.game = ChessGame.fromJSON(snapshot);
+        state.lastMove = lastMoveFromGameData(snapshot);
+        state.friendMoveInFlight = null;
+        if (data.room) syncRoom(data.room);
+        else render();
+        showToast(data.error || "Move rejected.");
+        return;
+      }
+      state.friendMoveInFlight = null;
+      state.lastMove = data.move ? { from: data.move.from, to: data.move.to } : { from, to };
+      syncRoom(data.room);
+    } catch {
+      state.game = ChessGame.fromJSON(snapshot);
+      state.lastMove = lastMoveFromGameData(snapshot);
+      state.friendMoveInFlight = null;
+      showToast("Move could not be synced. Check your connection.");
+      render();
+    }
   } else {
     const result = state.game.move(from, to, promotion);
     if (!result.ok) {
@@ -843,6 +874,7 @@ function startPolling() {
       if (!response.ok) return;
       const data = await response.json();
       debugLog("pollRoom", data.debug);
+      if (state.friendMoveInFlight) return;
       syncRoom(data.room);
     } catch (error) {
       console.warn("Room polling failed.", error);
@@ -918,6 +950,7 @@ function newGame() {
   state.timeWinner = null;
   state.lastMove = null;
   state.aiThinking = false;
+  state.friendMoveInFlight = null;
   state.friendRoomRequestSeq += 1;
   state.clocks = initialClocks();
   localStorage.removeItem("worldChessGame");
