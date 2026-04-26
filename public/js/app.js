@@ -37,6 +37,8 @@ const state = {
   aiThinking: false,
   friendMoveInFlight: null,
   friendRoomRequestSeq: 0,
+  fastPollUntil: 0,
+  lastSyncedMoveCount: 0,
   debugMode: false
 };
 
@@ -44,6 +46,9 @@ const stockfish = createStockfishClient();
 const AI_RESPONSE_DELAY_MS = 560;
 const AI_MIN_THINK_MS = 750;
 const EASY_RANDOM_MOVE_CHANCE = 0.55;
+const POLL_IDLE_MS = 1400;
+const POLL_FAST_MS = 350;
+const POLL_FAST_WINDOW_MS = 3500;
 
 const boardEl = document.querySelector("#board");
 const gameArea = document.querySelector("#gameArea");
@@ -251,6 +256,15 @@ function localDebugState() {
   };
 }
 
+function moveCountOfGameData(gameData) {
+  return Array.isArray(gameData?.moveCoords) ? gameData.moveCoords.length : 0;
+}
+
+function requestFastPolling(duration = POLL_FAST_WINDOW_MS) {
+  if (state.mode !== "friend") return;
+  state.fastPollUntil = Math.max(state.fastPollUntil, Date.now() + duration);
+}
+
 function showFriendShare(visible) {
   if (!friendShareBox) return;
   friendShareBox.classList.toggle("hidden", !visible);
@@ -366,8 +380,10 @@ async function startGame() {
   state.lastMove = null;
   state.aiThinking = false;
   state.friendMoveInFlight = null;
+  state.fastPollUntil = 0;
+  state.lastSyncedMoveCount = 0;
   state.clocks = initialClocks();
-  clearInterval(state.poller);
+  clearTimeout(state.poller);
   state.poller = null;
 
   if (state.mode === "friend") {
@@ -622,6 +638,7 @@ async function makeMove(from, to) {
 
     state.friendMoveInFlight = { snapshot };
     state.lastMove = { from, to };
+    requestFastPolling();
     render();
 
     try {
@@ -642,6 +659,7 @@ async function makeMove(from, to) {
       }
       state.friendMoveInFlight = null;
       state.lastMove = data.move ? { from: data.move.from, to: data.move.to } : { from, to };
+      requestFastPolling();
       syncRoom(data.room);
     } catch {
       state.game = ChessGame.fromJSON(snapshot);
@@ -851,21 +869,32 @@ async function joinRoom(roomId) {
     ? `Joined as ${state.playerColor}.`
     : "Room is full. Watching as spectator.";
   state.gameStarted = Boolean(data.room.whitePlayer && data.room.blackPlayer);
+  requestFastPolling(5000);
   startPolling();
   startClocks();
   render();
 }
 
 function startPolling() {
-  clearInterval(state.poller);
+  clearTimeout(state.poller);
   let pollInFlight = false;
+  const scheduleNext = () => {
+    if (!state.roomId) return;
+    const interval = Date.now() < state.fastPollUntil ? POLL_FAST_MS : POLL_IDLE_MS;
+    clearTimeout(state.poller);
+    state.poller = setTimeout(pollNow, interval);
+  };
   const pollNow = async () => {
-    if (!state.roomId || pollInFlight) return;
+    if (!state.roomId) return;
+    if (pollInFlight) {
+      scheduleNext();
+      return;
+    }
     pollInFlight = true;
     try {
       const response = await fetch(apiUrl(`/rooms/${state.roomId}`));
       if (response.status === 404) {
-        clearInterval(state.poller);
+        clearTimeout(state.poller);
         state.poller = null;
         roomStatus.textContent = "Room no longer exists.";
         showToast("Room not found.");
@@ -880,14 +909,19 @@ function startPolling() {
       console.warn("Room polling failed.", error);
     } finally {
       pollInFlight = false;
+      scheduleNext();
     }
   };
   pollNow();
-  state.poller = setInterval(pollNow, 1400);
 }
 
 function syncRoom(room) {
   if (!room) return;
+  const incomingMoveCount = moveCountOfGameData(room.game);
+  if (incomingMoveCount > state.lastSyncedMoveCount) {
+    requestFastPolling();
+  }
+  state.lastSyncedMoveCount = incomingMoveCount;
   const inferredColor = state.playerId
     ? (room.whitePlayer === state.playerId ? "white" : room.blackPlayer === state.playerId ? "black" : "")
     : "";
@@ -936,7 +970,7 @@ function copyRoomLink() {
 }
 
 function newGame() {
-  clearInterval(state.poller);
+  clearTimeout(state.poller);
   clearInterval(state.timer);
   state.poller = null;
   state.timer = null;
@@ -951,6 +985,8 @@ function newGame() {
   state.lastMove = null;
   state.aiThinking = false;
   state.friendMoveInFlight = null;
+  state.fastPollUntil = 0;
+  state.lastSyncedMoveCount = 0;
   state.friendRoomRequestSeq += 1;
   state.clocks = initialClocks();
   localStorage.removeItem("worldChessGame");
